@@ -49,7 +49,11 @@ permissions:
 jobs:
   ship:
     uses: TheDevs-cz/ci/.github/workflows/_ship.yml@v1   # pinned tag (no @master/@main)
-    secrets: inherit        # passes DEPLOY_WEBHOOK_SECRET + GITHUB_TOKEN
+    # Pass the secret EXPLICITLY — `secrets: inherit` does NOT cross owners, and
+    # most app repos (e.g. janmikes/*) are a different owner than TheDevs-cz.
+    # GITHUB_TOKEN is provided to the called workflow automatically.
+    secrets:
+      DEPLOY_WEBHOOK_SECRET: ${{ secrets.DEPLOY_WEBHOOK_SECRET }}
     with:
       app: my-app           # == apps/<app>/ on the box == GHCR image name == hook id
       image: ghcr.io/my-owner/my-app
@@ -57,6 +61,8 @@ jobs:
 ```
 
 The default image is `ghcr.io/<owner>/<repo>`; set `image:` if the GHCR name differs from the repo.
+**Note:** use explicit `secrets:` (not `inherit`) — inherit only works when caller and the
+shared-CI repo share an owner, which they usually don't here.
 
 ### Inputs
 
