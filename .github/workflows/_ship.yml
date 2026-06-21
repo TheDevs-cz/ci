@@ -166,9 +166,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # TEMP DEBUG (fingerprint, NOT the secret) — compare CI vs box secret.
-          echo "ci-secret-fp: $(printf '%s' "${DEPLOY_WEBHOOK_SECRET}" | sha256sum | cut -c1-16)"
-
           # Tag to deploy (default "main"); sha-<short> is also pushed above and
           # can be used later for immutable deploys by setting the deploy_tag input.
           tag="${DEPLOY_TAG}"
