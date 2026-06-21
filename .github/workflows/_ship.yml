@@ -166,6 +166,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          # TEMP DEBUG (fingerprint, NOT the secret) — compare CI vs box secret.
+          echo "ci-secret-fp: $(printf '%s' "${DEPLOY_WEBHOOK_SECRET}" | sha256sum | cut -c1-16)"
+
           # Tag to deploy (default "main"); sha-<short> is also pushed above and
           # can be used later for immutable deploys by setting the deploy_tag input.
           tag="${DEPLOY_TAG}"
@@ -183,7 +186,7 @@ jobs:
           # HMAC-SHA256 over the RAW body → hex digest → "sha256=<hex>" header.
           sig="$(printf '%s' "$body" \
             | openssl dgst -sha256 -hmac "$DEPLOY_WEBHOOK_SECRET" \
-            | awk '{print $2}')"
+            | awk '{print $NF}')"
 
           url="https://deploy.${DEPLOY_HOST}/hooks/${APP}"
           echo "POST ${url}  body=${body}  (signature redacted)"
