@@ -189,6 +189,11 @@ jobs:
           echo "POST ${url}  body=${body}  (signature redacted)"
 
           # --fail-with-body: print the receiver's response AND fail on non-2xx.
+          # We ALSO require the receiver's success marker ("QUEUED <app> <tag>") in
+          # the body: a bad/missing HMAC returns 200 "Hook rules were not satisfied"
+          # (running NOTHING), so a status check alone would let a REJECTED deploy
+          # masquerade as success. The marker only appears when enqueue.sh actually
+          # ran (i.e. the HMAC passed), making rejection a hard CI failure.
           http_body="$(curl --fail-with-body -sS \
             -X POST "$url" \
             -H 'Content-Type: application/json' \
@@ -196,4 +201,7 @@ jobs:
             -d "$body")"
 
           echo "receiver response: ${http_body}"
-          echo "deploy trigger accepted for ${APP} @ ${tag}"
+          case "$http_body" in
+            *"QUEUED ${APP}"*) echo "deploy trigger accepted for ${APP} @ ${tag}" ;;
+            *) echo "::error::deploy NOT enqueued (no success marker — HMAC rejected or receiver error)"; exit 1 ;;
+          esac
