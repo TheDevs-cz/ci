@@ -75,9 +75,11 @@ jobs:
   deploy:
     name: trigger deploy${{ inputs.await_deploy && ' & await result' || '' }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      checks: read
+    # Permissions are INHERITED from the caller (intentionally NOT declared here): a
+    # reusable job cannot request a scope the caller did not grant, and `await_deploy`
+    # needs `checks: read` which ONLY awaiting callers grant — declaring it here would
+    # make every non-awaiting caller fail at startup. See README (the await example
+    # adds `checks: read` at the caller level).
     # One deploy at a time per (app, host). cancel-in-progress:false ⇒ a running
     # deploy is NEVER cancelled mid-flight; new pushes queue and the newest pending
     # wins. See the header for the full rationale.

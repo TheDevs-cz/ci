@@ -107,7 +107,9 @@ on:
 
 jobs:
   build:
-    uses: ./.github/workflows/_build.yml
+    # Full ref (not ./) — a reusable workflow invoked cross-repo must reference nested
+    # reusable workflows by owner/repo@ref. Keep @v1 in lockstep with this file's tag.
+    uses: TheDevs-cz/ci/.github/workflows/_build.yml@v1
     permissions:
       contents: read
       packages: write
@@ -127,10 +129,9 @@ jobs:
 
   deploy:
     needs: build
-    uses: ./.github/workflows/_deploy.yml
-    permissions:
-      contents: read
-      checks: read
+    uses: TheDevs-cz/ci/.github/workflows/_deploy.yml@v1
+    # Permissions inherited from the caller (NOT declared): await needs checks:read,
+    # which only awaiting callers grant — declaring it here breaks non-await callers.
     with:
       app: ${{ inputs.app }}
       deploy_host: ${{ inputs.deploy_host }}
