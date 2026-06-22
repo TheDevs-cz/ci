@@ -31,8 +31,8 @@ app repo: push to main
                   └─ webhook receiver (non-root) verifies the per-app HMAC, enqueues a job
                        └─ host systemd executor (root) runs /srv/<app>/deploy.sh <tag>
                           (dump_secrets → migrate → zero-downtime rollout)
-                          └─ (if await_deploy) publishes a GitHub check-run with the
-                             status + redacted logs → this run goes red/green
+                          └─ (if await_deploy) posts a GitHub commit status (context
+                             "deploy") → this run goes red/green
 ```
 
 The receiver derives the app from the **hook URL** (`/hooks/<app>`), not the request body, so a
@@ -52,7 +52,7 @@ on:
 permissions:
   contents: read
   packages: write
-  checks: read              # required: await_deploy defaults to true (see below)
+  statuses: read           # required: await_deploy defaults to true (see below)
 
 jobs:
   ship:
@@ -132,9 +132,9 @@ Build inputs: `build_args`, `cache`, `provenance`, `target`, `dockerfile`, `cont
 outcome and is **red unless the deploy actually succeeded** (a green run is never just "enqueued").
 
 > **Prerequisite:** this only works when the deploy host runs the D27 executor **and** the app has a
-> `checks:write` token in the box's `/srv/deploy/checks.env`. Without both, the run polls for a
-> check-run that never appears and **times out red** (fail-closed). For apps on a host that isn't
-> activated yet, set `await_deploy: false` (fire-and-forget: green as soon as the trigger is accepted).
+> commit-statuses token in the box's `/srv/deploy/checks.env`. Without both, the run polls for a
+> `deploy` status that never appears and **times out red** (fail-closed). For apps on a host that
+> isn't activated yet, set `await_deploy: false` (fire-and-forget: green once the trigger is accepted).
 
 With the default (`await_deploy: true`):
 
@@ -145,7 +145,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-      checks: read                       # required for await_deploy
+      statuses: read                     # required for await_deploy
     secrets:
       DEPLOY_WEBHOOK_SECRET: ${{ secrets.DEPLOY_WEBHOOK_SECRET }}
     with:
@@ -159,18 +159,15 @@ With `await_deploy: true`:
 - **Status** — the run **fails (red)** if `deploy.sh` fails (bad image, failed migration, rollout
   health-check abort/revert, executor timeout) and **passes (green) only** if the deploy finished
   `rc=0`. It is **fail-closed**: no success proof ⇒ failure.
-- **Where to see it** — three places:
-  1. A **check-run named `deploy`** on the commit/PR (the repo's **Checks** tab).
-  2. **Inline in this run** — the await step echoes the deploy log into a collapsible group.
-  3. The run's overall **red/green**.
-- **Logs** — the check + inline log show a **redacted tail** of the deploy output (secrets stripped;
-  by default only status is public and full logs stay on the box — see below). The **full,
-  unredacted** logs live on the deploy host and are queryable in **Grafana/Loki** (label `app="deploy"`,
-  filter by your app) with 30-day retention, and via `journalctl -u lily-deploy-runner` on the box.
+- **Where to see it** — two places:
+  1. A **`deploy` status** on the commit/PR (the checks section): `pending` → `success`/`failure`.
+  2. The run's overall **red/green** — the `await` step passes only on a successful deploy.
+- **Logs** — the status carries only the result + a short line (commit statuses can't hold a log). The
+  **full** deploy logs live on the deploy host: **Grafana/Loki** (label `app="deploy"`, filter by your
+  app; 30-day retention) and `journalctl -u lily-deploy-runner` on the box.
 
-> **Correlation is exact.** Each run sends a unique `job_id` + `nonce` and the box reports back on
-> *that* nonce + *your* commit SHA, so concurrent runs, retries, and queued deploys never show each
-> other's result.
+> **Correlation.** The box posts the `deploy` status on *your* commit SHA, and the `await` reads the
+> newest `deploy` status for that SHA — so runs on different commits never cross results.
 
 `await_timeout_seconds` (default `2700`) bounds the wait. The box runs **one deploy at a time**, so an
 app queued behind others waits longer — keep the timeout above the box executor limit (1800s) plus
@@ -235,7 +232,7 @@ jobs:
   # ... your own job(s) here, e.g. scan ${{ needs.build.outputs.digest }} ...
   deploy:
     needs: build
-    permissions: { contents: read, checks: read }
+    permissions: { contents: read, statuses: read }
     uses: TheDevs-cz/ci/.github/workflows/_deploy.yml@v1
     secrets:
       DEPLOY_WEBHOOK_SECRET: ${{ secrets.DEPLOY_WEBHOOK_SECRET }}

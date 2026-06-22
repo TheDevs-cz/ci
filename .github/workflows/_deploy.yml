@@ -146,16 +146,18 @@ jobs:
             echo "tag=${tag}"
           } >> "$GITHUB_OUTPUT"
 
-      # ---- 2. await the real deploy result + logs ---------------------------
-      # Polls the GitHub check-run the box publishes for OUR nonce on OUR sha. The
-      # check-run also shows natively in this repo's Checks tab; here we additionally
-      # surface its conclusion (red/green) and echo its (redacted) log into this run.
+      # ---- 2. await the real deploy result ----------------------------------
+      # The box posts a COMMIT STATUS (context="deploy") on OUR sha: `pending` while it
+      # runs, then `success`/`failure`. We poll the newest "deploy" status and turn THIS
+      # run red/green accordingly — so the pipeline reflects the ACTUAL deploy outcome.
+      # Fail-closed: no terminal status by the deadline ⇒ red. (Full deploy logs live
+      # box-side: Grafana app="deploy" / journalctl -u lily-deploy-runner.) The `deploy`
+      # status also shows natively on the commit/PR.
       - name: Await deploy result
         if: ${{ inputs.await_deploy }}
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ steps.trigger.outputs.head_sha }}
-          NONCE: ${{ steps.trigger.outputs.nonce }}
           TIMEOUT_S: ${{ inputs.await_timeout_seconds }}
         run: |
           set -euo pipefail
@@ -164,32 +166,23 @@ jobs:
           TIMEOUT_S="${TIMEOUT_S%.*}"
           case "$TIMEOUT_S" in ''|*[!0-9]*) echo '::error::await_timeout_seconds must be a positive integer'; exit 1 ;; esac
           deadline=$(( $(date +%s) + TIMEOUT_S ))
-          api="repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?check_name=deploy&per_page=100"
-          echo "Waiting for deploy result (sha=${HEAD_SHA}, nonce=${NONCE}, timeout=${TIMEOUT_S}s)..."
+          api="repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/statuses?per_page=100"
+          echo "Waiting for the box to report the deploy result (sha=${HEAD_SHA}, context=deploy, timeout=${TIMEOUT_S}s)..."
 
           while :; do
-            # --paginate + slurp: find our run even if >100 deploy checks exist on this sha.
-            json="$(gh api --paginate -H 'Accept: application/vnd.github+json' "$api" 2>/dev/null | jq -s '{check_runs: (map(.check_runs) | add)}' 2>/dev/null || echo '{}')"
-            # "<status> <conclusion>" for OUR nonce (space-separated single tokens).
-            row="$(printf '%s' "$json" | jq -r --arg n "$NONCE" '.check_runs[]? | select(.external_id==$n) | "\(.status) \(.conclusion // "none")"' | head -n1)"
-            status="${row%% *}"
-            conclusion="${row##* }"
-
-            if [ "$status" = "completed" ]; then
-              log="$(printf '%s' "$json" | jq -r --arg n "$NONCE" '.check_runs[]? | select(.external_id==$n) | .output.text // ""' | head -c 200000)"
-              echo "::group::deploy log (redacted, from box)"
-              printf '%s\n' "$log"
-              echo "::endgroup::"
-              if [ "$conclusion" = "success" ]; then
-                echo "deploy OK (${HEAD_SHA})"; exit 0
-              fi
-              echo "::error::deploy concluded '${conclusion:-unknown}' - see the log above / box deploy.log"
-              exit 1
-            fi
-
+            # Newest 'deploy' commit status for THIS sha (the API returns newest-first).
+            json="$(gh api -H 'Accept: application/vnd.github+json' "$api" 2>/dev/null || echo '[]')"
+            state="$(printf '%s' "$json" | jq -r 'map(select(.context=="deploy")) | (first.state // "none")' 2>/dev/null || echo none)"
+            desc="$(printf '%s'  "$json" | jq -r 'map(select(.context=="deploy")) | (first.description // "")' 2>/dev/null || echo '')"
+            case "$state" in
+              success)        echo "deploy succeeded - ${desc}"; exit 0 ;;
+              failure|error)  echo "::error::deploy ${state} - ${desc}"; exit 1 ;;
+              pending)        echo "deploy in progress... ${desc}" ;;
+              *)              echo "waiting for the box to post a deploy status..." ;;
+            esac
             if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "::error::timed out after ${TIMEOUT_S}s waiting for the deploy result."
-              echo "::error::The deploy may be queued behind other apps (one serialized executor) or the box/executor is down."
+              echo "::error::timed out after ${TIMEOUT_S}s - no terminal deploy status on ${HEAD_SHA}."
+              echo "::error::The box may be queued behind other deploys, down, or missing its checks token."
               exit 1
             fi
             sleep 10
