@@ -50,12 +50,13 @@ on:
         default: false
       await_deploy:
         description: >-
-          Wait for the real deploy result via the GitHub Checks API and fail this run
-          unless the deploy finished OK (status + redacted logs surface in this run
-          and the repo's Checks tab). Default false (exit green once enqueued).
+          Wait for the real deploy result and fail this run unless the deploy finished
+          OK (fail-closed; status + redacted logs surface here and in the Checks tab).
+          DEFAULT true. Requires the box D27 executor + a per-app checks:write token,
+          else the run times out red. Set false for fire-and-forget (green on QUEUED).
         required: false
         type: boolean
-        default: false
+        default: true
       await_timeout_seconds:
         description: Max seconds to await the deploy result. Default 2700 (> box 1800s + queue).
         required: false

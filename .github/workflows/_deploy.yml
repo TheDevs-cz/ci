@@ -52,12 +52,15 @@ on:
         default: main
       await_deploy:
         description: >-
-          If true, WAIT for the box to report the real deploy result via a GitHub
-          check-run and fail this run unless the deploy finished successfully. If
-          false (default), exit green as soon as the trigger is accepted (QUEUED).
+          WAIT for the box to report the real deploy result via a GitHub check-run and
+          fail this run unless the deploy actually finished successfully (fail-closed).
+          DEFAULT true — a green run means a real, successful deploy, not merely
+          "enqueued". REQUIRES the deploy host to run the D27 executor AND a per-app
+          checks:write token in /srv/deploy/checks.env; without them the run times out
+          red. Set false for fire-and-forget (green as soon as the trigger is QUEUED).
         required: false
         type: boolean
-        default: false
+        default: true
       await_timeout_seconds:
         description: >-
           Max seconds to wait for the deploy result. MUST exceed the box executor

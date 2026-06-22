@@ -52,7 +52,7 @@ on:
 permissions:
   contents: read
   packages: write
-  checks: read              # needed only if you set await_deploy: true
+  checks: read              # required: await_deploy defaults to true (see below)
 
 jobs:
   ship:
@@ -128,9 +128,15 @@ Build inputs: `build_args`, `cache`, `provenance`, `target`, `dockerfile`, `cont
 
 ## Deploy status + logs in your CI
 
-By default the deploy is fire-and-forget: the run goes green as soon as the box **accepts** the
-trigger (it does not yet know if the deploy succeeded). Set **`await_deploy: true`** to make the run
-reflect the **real** deploy outcome:
+**`await_deploy` defaults to `true`**: the run waits for the box to report the **real** deploy
+outcome and is **red unless the deploy actually succeeded** (a green run is never just "enqueued").
+
+> **Prerequisite:** this only works when the deploy host runs the D27 executor **and** the app has a
+> `checks:write` token in the box's `/srv/deploy/checks.env`. Without both, the run polls for a
+> check-run that never appears and **times out red** (fail-closed). For apps on a host that isn't
+> activated yet, set `await_deploy: false` (fire-and-forget: green as soon as the trigger is accepted).
+
+With the default (`await_deploy: true`):
 
 ```yaml
 jobs:
@@ -202,7 +208,7 @@ already-started box deploy still finishes (the box doesn't depend on the CI conn
 | `deploy_host`           | no       | `lily.srv.thedevs.cz`     | server FQDN; webhook vhost is `deploy.<deploy_host>` |
 | `deploy_tag`            | no       | `main`                    | tag sent to the receiver to deploy |
 | `deploy_sha`            | no       | `false`                   | deploy the immutable `sha-<git-sha>` tag just built |
-| `await_deploy`          | no       | `false`                   | wait for the real deploy result; fail the run if it failed |
+| `await_deploy`          | no       | `true`                    | wait for the real deploy result; fail the run if it failed (needs box D27 + token) |
 | `await_timeout_seconds` | no       | `2700`                    | max seconds to await the result (> 1800 + queue) |
 | `context`               | no       | `.`                       | Docker build context |
 | `dockerfile`            | no       | `Dockerfile`              | path to the Dockerfile (relative to `context`) |
