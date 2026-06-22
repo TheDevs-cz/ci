@@ -169,9 +169,9 @@ With `await_deploy: true`:
 > **Correlation.** The box posts the `deploy` status on *your* commit SHA, and the `await` reads the
 > newest `deploy` status for that SHA — so runs on different commits never cross results.
 
-`await_timeout_seconds` (default `2700`) bounds the wait. The box runs **one deploy at a time**, so an
-app queued behind others waits longer — keep the timeout above the box executor limit (1800s) plus
-expected queue depth, or a healthy-but-queued deploy will false-red.
+`await_timeout_seconds` (default `300` = 5 min) bounds the wait, then fails red. Fine for typical fast
+deploys; **raise it** for slow blue-green health-waits or apps that may be queued behind others (the box
+runs **one deploy at a time**), or a healthy-but-slow/queued deploy will false-red.
 
 ## One deploy at a time (concurrency)
 
@@ -206,7 +206,7 @@ already-started box deploy still finishes (the box doesn't depend on the CI conn
 | `deploy_tag`            | no       | `main`                    | tag sent to the receiver to deploy |
 | `deploy_sha`            | no       | `false`                   | deploy the immutable `sha-<git-sha>` tag just built |
 | `await_deploy`          | no       | `true`                    | wait for the real deploy result; fail the run if it failed (needs box D27 + token) |
-| `await_timeout_seconds` | no       | `2700`                    | max seconds to await the result (> 1800 + queue) |
+| `await_timeout_seconds` | no       | `300`                     | max seconds to await the result, then red (raise for slow/queued) |
 | `context`               | no       | `.`                       | Docker build context |
 | `dockerfile`            | no       | `Dockerfile`              | path to the Dockerfile (relative to `context`) |
 | `platforms`             | no       | `linux/amd64`             | build platform(s); the box is amd64-only |

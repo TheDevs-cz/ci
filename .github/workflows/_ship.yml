@@ -58,10 +58,10 @@ on:
         type: boolean
         default: true
       await_timeout_seconds:
-        description: Max seconds to await the deploy result. Default 2700 (> box 1800s + queue).
+        description: Max seconds to await the deploy result before failing red. Default 300 (5 min); raise for slow/queued deploys.
         required: false
         type: number
-        default: 2700
+        default: 300
       # ---- build customisation ----
       context:
         description: Docker build context.

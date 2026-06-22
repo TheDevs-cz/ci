@@ -63,12 +63,13 @@ on:
         default: true
       await_timeout_seconds:
         description: >-
-          Max seconds to wait for the deploy result. MUST exceed the box executor
-          timeout (1800s) PLUS worst-case queue wait behind other apps (one
-          serialized executor). Default 2700s.
+          Max seconds to wait for the deploy result before failing red. Default 300
+          (5 min) — fine for typical fast deploys. RAISE it for slow blue-green
+          health-waits or when an app may be queued behind others (the box runs one
+          deploy at a time); otherwise a healthy-but-slow/queued deploy can false-red.
         required: false
         type: number
-        default: 2700
+        default: 300
     secrets:
       DEPLOY_WEBHOOK_SECRET:
         description: Per-app HMAC secret shared ONLY with this app's hook on the box.
