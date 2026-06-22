@@ -136,6 +136,16 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           provenance: ${{ inputs.provenance }}
-          # Per-IMAGE cache scope → no cross-app cache poisoning. Empty when cache=false.
-          cache-from: ${{ inputs.cache && format('type=gha,scope={0}', inputs.image) || '' }}
-          cache-to: ${{ inputs.cache && format('type=gha,mode=max,scope={0}', inputs.image) || '' }}
+          # Cache: maximize cross-run layer reuse. mode=max caches ALL layers (incl.
+          # multi-stage intermediates), across TWO durable backends, both per-image:
+          #   - gha      : fast, GitHub-hosted (subject to ~10GB / 7-day LRU eviction)
+          #   - registry : a :buildcache tag in GHCR — NO eviction / NO size cap,
+          #                persists, cross-branch. The box never pulls it (it deploys
+          #                main/sha); the tag is overwritten each build (doesn't grow).
+          # Blank lines when cache=false → build-push-action ignores empty cache entries.
+          cache-from: |
+            ${{ inputs.cache && format('type=gha,scope={0}', inputs.image) || '' }}
+            ${{ inputs.cache && format('type=registry,ref={0}:buildcache', inputs.image) || '' }}
+          cache-to: |
+            ${{ inputs.cache && format('type=gha,scope={0},mode=max', inputs.image) || '' }}
+            ${{ inputs.cache && format('type=registry,ref={0}:buildcache,mode=max', inputs.image) || '' }}

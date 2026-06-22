@@ -89,6 +89,12 @@ jobs:
       context: .                         # default: .
 ```
 
+**Caching.** With `cache: true` (default), builds use `mode=max` (all layers, including
+multi-stage intermediates) across **two** per-image backends: GitHub Actions cache (fast) and a
+persistent `ghcr.io/<owner>/<app>:buildcache` registry tag (no eviction, survives across branches).
+The `:buildcache` tag is overwritten each build (it doesn't accumulate) and is never pulled by the
+deploy host — it only deploys `main`/`sha-*`. Set `cache: false` to disable both.
+
 In your `Dockerfile`:
 
 ```dockerfile
@@ -203,7 +209,7 @@ already-started box deploy still finishes (the box doesn't depend on the CI conn
 | `platforms`             | no       | `linux/amd64`             | build platform(s); the box is amd64-only |
 | `target`                | no       | `''`                      | multi-stage build target |
 | `build_args`            | no       | `''`                      | newline `KEY=VALUE` build args (**non-secret**) |
-| `cache`                 | no       | `true`                    | per-image GitHub Actions layer cache |
+| `cache`                 | no       | `true`                    | per-image layer cache: GHA + GHCR `:buildcache`, `mode=max` |
 | `provenance`            | no       | `true`                    | SLSA provenance attestation |
 
 Secrets: **`DEPLOY_WEBHOOK_SECRET`** (required), **`BUILD_SECRETS`** (optional, BuildKit mounts).
