@@ -1,0 +1,191 @@
+# =============================================================================
+# .github/workflows/_deploy.yml — TheDevs shared, reusable DEPLOY-TRIGGER workflow.
+# =============================================================================
+# The SECURITY-CRITICAL half of the old _ship.yml, isolated in its own tiny file:
+#   1. Fire an HMAC-signed deploy trigger at the box's webhook receiver.
+#   2. (optional) WAIT for the real deploy result + logs via the GitHub Checks API
+#      and turn THIS run red/green accordingly.
+#
+# This job holds ONLY `DEPLOY_WEBHOOK_SECRET` (never the GHCR token) and only
+# `contents:read` + `checks:read`. The privilege split from _build.yml is the point.
+#
+# HANDSHAKE CONTRACT (every file in the system agrees — do not drift):
+#   endpoint : https://deploy.<deploy_host>/hooks/<app>   (hook id == app name)
+#   auth     : HMAC-SHA256 over the RAW request body
+#   header   : X-Hub-Signature-256: sha256=<hexdigest>
+#   body     : {"app":"<app>","tag":"<tag>","job_id":"<32hex>","head_sha":"<40hex>","nonce":"<32hex>"}
+#              (compact, no spaces; bytes signed == bytes sent)
+#   marker   : receiver returns "QUEUED <app> <tag>" iff the HMAC passed and the
+#              job was spooled (a bad HMAC returns 200 with NO marker → still fails)
+#
+# RESULT FEEDBACK (await_deploy):
+#   The box's ROOT executor creates a GitHub check-run named "deploy" on <head_sha>
+#   with external_id == <nonce>, updates it with the (redacted) deploy log, and sets
+#   conclusion=success|failure. We poll for OUR nonce on OUR sha → no cross-talk with
+#   concurrent runs / retries. Absence of a success conclusion is ALWAYS a failure
+#   (fail-closed). The check is created on the box side; this workflow only READS it.
+#
+# CONCURRENCY (one deploy at a time, never mid-job cancel):
+#   group deploy-<app>-<host>, cancel-in-progress:false → an in-progress deploy
+#   ALWAYS finishes; a newer push queues as `pending`; a still-newer push replaces
+#   the pending one (the box's flock is the global backstop across all apps).
+# =============================================================================
+
+name: deploy
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: App id == hook id == apps/<app>/ on the box == GHCR image name.
+        required: true
+        type: string
+      deploy_host:
+        description: Server FQDN; the webhook vhost is deploy.<deploy_host>.
+        required: false
+        type: string
+        default: lily.srv.thedevs.cz
+      deploy_tag:
+        description: Image tag to deploy (sent to the receiver). Default "main".
+        required: false
+        type: string
+        default: main
+      await_deploy:
+        description: >-
+          If true, WAIT for the box to report the real deploy result via a GitHub
+          check-run and fail this run unless the deploy finished successfully. If
+          false (default), exit green as soon as the trigger is accepted (QUEUED).
+        required: false
+        type: boolean
+        default: false
+      await_timeout_seconds:
+        description: >-
+          Max seconds to wait for the deploy result. MUST exceed the box executor
+          timeout (1800s) PLUS worst-case queue wait behind other apps (one
+          serialized executor). Default 2700s.
+        required: false
+        type: number
+        default: 2700
+    secrets:
+      DEPLOY_WEBHOOK_SECRET:
+        description: Per-app HMAC secret shared ONLY with this app's hook on the box.
+        required: true
+
+jobs:
+  deploy:
+    name: trigger deploy${{ inputs.await_deploy && ' & await result' || '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
+    # One deploy at a time per (app, host). cancel-in-progress:false ⇒ a running
+    # deploy is NEVER cancelled mid-flight; new pushes queue and the newest pending
+    # wins. See the header for the full rationale.
+    concurrency:
+      group: deploy-${{ inputs.app }}-${{ inputs.deploy_host }}
+      cancel-in-progress: false
+    steps:
+      # ---- 1. fire the HMAC-signed deploy trigger ---------------------------
+      - name: Trigger deploy (HMAC)
+        id: trigger
+        env:
+          APP: ${{ inputs.app }}
+          DEPLOY_HOST: ${{ inputs.deploy_host }}
+          DEPLOY_TAG: ${{ inputs.deploy_tag }}
+          HEAD_SHA: ${{ github.sha }}
+          DEPLOY_WEBHOOK_SECRET: ${{ secrets.DEPLOY_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+
+          tag="${DEPLOY_TAG}"
+          # Defence in depth: the SAME whitelist the receiver + executor enforce.
+          if ! printf '%s' "$tag" | grep -Eq '^[A-Za-z0-9._-]{1,128}$'; then
+            echo "::error::computed tag '$tag' fails the whitelist regex"; exit 1
+          fi
+
+          # Per-RUN correlation ids: job_id (this trigger) + nonce (matches the
+          # check-run). Fresh every run so retries / concurrent runs never collide.
+          job_id="$(openssl rand -hex 16)"   # 32 hex
+          nonce="$(openssl rand -hex 16)"     # 32 hex
+          head_sha="${HEAD_SHA}"              # 40 hex (the commit the check attaches to)
+
+          # Compact JSON body — bytes signed == bytes sent (no trailing newline).
+          body="$(printf '{"app":"%s","tag":"%s","job_id":"%s","head_sha":"%s","nonce":"%s"}' \
+            "$APP" "$tag" "$job_id" "$head_sha" "$nonce")"
+
+          sig="$(printf '%s' "$body" \
+            | openssl dgst -sha256 -hmac "$DEPLOY_WEBHOOK_SECRET" | awk '{print $NF}')"
+
+          url="https://deploy.${DEPLOY_HOST}/hooks/${APP}"
+          echo "POST ${url}  (app=${APP} tag=${tag} sha=${head_sha} — signature redacted)"
+
+          # --fail-with-body: print the receiver response AND fail on non-2xx. We
+          # ALSO require the "QUEUED <app>" marker: a bad/missing HMAC returns 200
+          # "Hook rules were not satisfied" (running NOTHING), so a status check
+          # alone would let a REJECTED deploy look like success.
+          http_body="$(curl --fail-with-body -sS \
+            -X POST "$url" \
+            -H 'Content-Type: application/json' \
+            -H "X-Hub-Signature-256: sha256=${sig}" \
+            -d "$body")"
+          echo "receiver response: ${http_body}"
+          case "$http_body" in
+            *"QUEUED ${APP}"*) echo "deploy trigger accepted for ${APP} @ ${tag}" ;;
+            *) echo "::error::deploy NOT enqueued (no success marker — HMAC rejected or receiver error)"; exit 1 ;;
+          esac
+
+          {
+            echo "nonce=${nonce}"
+            echo "job_id=${job_id}"
+            echo "head_sha=${head_sha}"
+            echo "tag=${tag}"
+          } >> "$GITHUB_OUTPUT"
+
+      # ---- 2. await the real deploy result + logs ---------------------------
+      # Polls the GitHub check-run the box publishes for OUR nonce on OUR sha. The
+      # check-run also shows natively in this repo's Checks tab; here we additionally
+      # surface its conclusion (red/green) and echo its (redacted) log into this run.
+      - name: Await deploy result
+        if: ${{ inputs.await_deploy }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.trigger.outputs.head_sha }}
+          NONCE: ${{ steps.trigger.outputs.nonce }}
+          TIMEOUT_S: ${{ inputs.await_timeout_seconds }}
+        run: |
+          set -euo pipefail
+          # await_timeout_seconds is a number input; coerce to a positive integer so a
+          # fractional literal can't crash bash arithmetic below.
+          TIMEOUT_S="${TIMEOUT_S%.*}"
+          case "$TIMEOUT_S" in ''|*[!0-9]*) echo '::error::await_timeout_seconds must be a positive integer'; exit 1 ;; esac
+          deadline=$(( $(date +%s) + TIMEOUT_S ))
+          api="repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?check_name=deploy&per_page=100"
+          echo "Waiting for deploy result (sha=${HEAD_SHA}, nonce=${NONCE}, timeout=${TIMEOUT_S}s)..."
+
+          while :; do
+            # --paginate + slurp: find our run even if >100 deploy checks exist on this sha.
+            json="$(gh api --paginate -H 'Accept: application/vnd.github+json' "$api" 2>/dev/null | jq -s '{check_runs: (map(.check_runs) | add)}' 2>/dev/null || echo '{}')"
+            # "<status> <conclusion>" for OUR nonce (space-separated single tokens).
+            row="$(printf '%s' "$json" | jq -r --arg n "$NONCE" '.check_runs[]? | select(.external_id==$n) | "\(.status) \(.conclusion // "none")"' | head -n1)"
+            status="${row%% *}"
+            conclusion="${row##* }"
+
+            if [ "$status" = "completed" ]; then
+              log="$(printf '%s' "$json" | jq -r --arg n "$NONCE" '.check_runs[]? | select(.external_id==$n) | .output.text // ""' | head -c 200000)"
+              echo "::group::deploy log (redacted, from box)"
+              printf '%s\n' "$log"
+              echo "::endgroup::"
+              if [ "$conclusion" = "success" ]; then
+                echo "deploy OK (${HEAD_SHA})"; exit 0
+              fi
+              echo "::error::deploy concluded '${conclusion:-unknown}' - see the log above / box deploy.log"
+              exit 1
+            fi
+
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::timed out after ${TIMEOUT_S}s waiting for the deploy result."
+              echo "::error::The deploy may be queued behind other apps (one serialized executor) or the box/executor is down."
+              exit 1
+            fi
+            sleep 10
+          done

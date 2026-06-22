@@ -1,35 +1,19 @@
 # =============================================================================
-# .github/workflows/_ship.yml — TheDevs shared, reusable "ship" workflow.
+# .github/workflows/_ship.yml — TheDevs shared "ship" workflow (thin orchestrator).
 # =============================================================================
-# ONE workflow, called by every app repo. It does two things, in order:
-#   1. Build a multi-tagged image and PUSH it to GHCR (ghcr.io/<owner>/<app>) —
-#      including the immutable sha-<short> tag (kept for traceability/rollback).
-#   2. Fire an HMAC-signed deploy trigger at the box's public webhook receiver,
-#      asking it to roll out the configured tag (DEFAULT `main`; see deploy_tag).
+# The one-line entrypoint every app uses. It composes two reusable halves:
+#   1. _build.yml   — build the image + push to GHCR (customisable: build args,
+#                     cache, target, build secrets). Holds `packages:write`.
+#   2. _deploy.yml  — HMAC-trigger the box deploy and (optionally) WAIT for the
+#                     real result + logs. Holds ONLY `DEPLOY_WEBHOOK_SECRET`.
 #
-# Privilege is DECOUPLED on purpose: this workflow (and the per-app secret it
-# holds) can ONLY (a) push to THAT app's GHCR image and (b) ask the receiver to
-# deploy a *tag* of THAT app. A leaked DEPLOY_WEBHOOK_SECRET re-triggers one
-# app's deploy and nothing else — it carries no SSH key, no docker socket, no
-# /srv access. The receiver pins the app from the hook id (URL), not the body.
+# Splitting build from deploy keeps the security-critical deploy signer in one tiny
+# file with NO build token, lets the build be customised per app without touching
+# the signer, and gives a deploy-only entrypoint (_deploy.yml) for re-deploys.
 #
-# HANDSHAKE CONTRACT (every file in the system agrees on these — do not drift):
-#   endpoint : https://deploy.<deploy_host>/hooks/<app>   (hook id == app name)
-#   auth     : HMAC-SHA256 over the RAW request body
-#   header   : X-Hub-Signature-256: sha256=<hexdigest>
-#   body     : {"app":"<app>","tag":"<tag>"}   (compact, no spaces)
-#   tag      : the tag to deploy — DEFAULT "main" (sha-<short> is also built &
-#              pushed; flip deploy_tag to it later for immutable deploys)
-#   image    : ghcr.io/<owner>/<app>:<tags...>  (owner/app FIXED in app compose;
-#              only the TAG varies → leak can't switch apps or images)
-#
-# SECURITY (non-negotiable, from the research):
-#   - Callers MUST trigger on `push` to main ONLY (never pull_request_target,
-#     never checkout untrusted PR code). This reusable workflow does not gate
-#     that — the CALLER's `on:` does — see README.md.
-#   - All third-party actions are pinned (major tag here; bump deliberately).
-#   - HMAC is computed with openssl (constant-time verify happens at the
-#     receiver via adnanh/webhook's payload-hmac-sha256 rule).
+# The caller surface is BACKWARD-COMPATIBLE: every input below is optional except
+# `app`, and defaults reproduce the original behavior. Existing `_ship.yml@v1`
+# callers keep working unchanged. See README.md for examples.
 # =============================================================================
 
 name: ship
@@ -37,171 +21,122 @@ name: ship
 on:
   workflow_call:
     inputs:
+      # ---- identity / deploy ----
       app:
-        description: >-
-          App id == hook id == apps/<app>/ on the box == GHCR image name == the
-          Infisical project. The receiver derives the app from the hook URL, so
-          this MUST equal the directory the box deploys.
+        description: App id == hook id == apps/<app>/ on the box == GHCR image name.
         required: true
         type: string
       image:
-        description: >-
-          Fully-qualified GHCR image (lowercase). Defaults to
-          ghcr.io/<owner>/<repo>. Owner/app are FIXED in the app's infra compose;
-          only the tag varies at deploy time.
+        description: Fully-qualified GHCR image (lowercase). Default ghcr.io/<owner>/<repo>.
         required: false
         type: string
         default: ghcr.io/${{ github.repository }}
       deploy_host:
-        description: >-
-          Server FQDN selecting WHICH box to deploy to. The webhook vhost is
-          deploy.<deploy_host>. Default is the primary box.
+        description: Server FQDN; the webhook vhost is deploy.<deploy_host>.
         required: false
         type: string
         default: lily.srv.thedevs.cz
-      dockerfile:
-        description: Path to the Dockerfile (relative to context).
+      deploy_tag:
+        description: Image tag to deploy (default "main"). Ignored when deploy_sha=true.
         required: false
         type: string
-        default: Dockerfile
+        default: main
+      deploy_sha:
+        description: >-
+          Deploy the IMMUTABLE sha-<git-sha> tag this build pushed instead of "main"
+          (re-runnable, exact). One-line opt-in to immutable deploys.
+        required: false
+        type: boolean
+        default: false
+      await_deploy:
+        description: >-
+          Wait for the real deploy result via the GitHub Checks API and fail this run
+          unless the deploy finished OK (status + redacted logs surface in this run
+          and the repo's Checks tab). Default false (exit green once enqueued).
+        required: false
+        type: boolean
+        default: false
+      await_timeout_seconds:
+        description: Max seconds to await the deploy result. Default 2700 (> box 1800s + queue).
+        required: false
+        type: number
+        default: 2700
+      # ---- build customisation ----
       context:
         description: Docker build context.
         required: false
         type: string
         default: .
+      dockerfile:
+        description: Path to the Dockerfile (relative to context).
+        required: false
+        type: string
+        default: Dockerfile
       platforms:
-        description: Target platform(s). The box is amd64 only; keep it single.
+        description: Target platform(s). The box is amd64-only.
         required: false
         type: string
         default: linux/amd64
-      deploy_tag:
-        description: >-
-          Image tag to deploy (sent to the receiver). DEFAULT "main": we still
-          build+push the immutable sha-<short> tag, but deploy `main` for
-          simplicity + less box image storage. Set to a pushed sha-<short> for an
-          immutable, re-runnable deploy — one-line change, no box edit.
+      target:
+        description: Optional multi-stage build target.
         required: false
         type: string
-        default: main
+        default: ''
+      build_args:
+        description: Newline-separated KEY=VALUE build args (NON-SECRET; e.g. APP_VERSION=...).
+        required: false
+        type: string
+        default: ''
+      cache:
+        description: Enable per-image GitHub Actions layer cache. Default true.
+        required: false
+        type: boolean
+        default: true
+      provenance:
+        description: Emit SLSA provenance. Default true.
+        required: false
+        type: boolean
+        default: true
     secrets:
       DEPLOY_WEBHOOK_SECRET:
-        description: >-
-          Per-app HMAC secret shared ONLY between this app's CI and the box's
-          receiver hook for THIS app. A leak can re-trigger only this app.
+        description: Per-app HMAC deploy secret (passed only to _deploy.yml).
         required: true
-      # GITHUB_TOKEN is inherited automatically for GHCR push (packages:write).
+      BUILD_SECRETS:
+        description: Optional BuildKit secret mounts (passed only to _build.yml).
+        required: false
 
 jobs:
-  ship:
-    name: build, push & trigger deploy
-    runs-on: ubuntu-latest
-    # Least privilege: read the repo, push the package. Nothing else.
+  build:
+    uses: ./.github/workflows/_build.yml
     permissions:
       contents: read
       packages: write
-    steps:
-      # ---- 1. checkout -------------------------------------------------------
-      - name: Checkout
-        uses: actions/checkout@v4
+    with:
+      image: ${{ inputs.image }}
+      context: ${{ inputs.context }}
+      dockerfile: ${{ inputs.dockerfile }}
+      platforms: ${{ inputs.platforms }}
+      target: ${{ inputs.target }}
+      build_args: ${{ inputs.build_args }}
+      cache: ${{ inputs.cache }}
+      provenance: ${{ inputs.provenance }}
+    secrets:
+      # GHCR token is provided automatically to _build.yml; the deploy secret is
+      # deliberately NOT passed here.
+      BUILD_SECRETS: ${{ secrets.BUILD_SECRETS }}
 
-      # ---- 2. log in to GHCR -------------------------------------------------
-      # github.actor + the inherited GITHUB_TOKEN. The token's packages:write is
-      # scoped to THIS repo's packages, so this can only push this app's image.
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # ---- 3. Buildx (needed for build-push-action + provenance) -------------
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      # ---- 4. image metadata: compute the tag set ---------------------------
-      # Tags produced (all pushed to GHCR):
-      #   - sha-<short>  : the IMMUTABLE tag (kept for traceability/rollback; the
-      #                    receiver/executor enforce ^[A-Za-z0-9._-]{1,128}$).
-      #   - latest       : convenience pointer, ONLY on the default branch.
-      #   - <branch>     : the branch ref (e.g. "main") — what we DEPLOY by default.
-      # We deploy the `deploy_tag` (default "main") for storage simplicity; the
-      # sha-<short> is always pushed so we can flip to immutable deploys later.
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ inputs.image }}
-          tags: |
-            type=sha,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=branch
-
-      # ---- 5. build & push ---------------------------------------------------
-      # provenance:true → SLSA attestation. The compose on the box pulls the
-      # exact ghcr.io/<owner>/<app>:sha-<short> we push here.
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ inputs.context }}
-          file: ${{ inputs.context }}/${{ inputs.dockerfile }}
-          platforms: ${{ inputs.platforms }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          provenance: true
-
-      # ---- 6. fire the HMAC-signed deploy trigger ---------------------------
-      # Send the deploy_tag (default "main") to the receiver. The body is compact
-      # JSON; the HMAC is over the RAW bytes we send (-d "$body") with no
-      # reformatting.
-      #
-      # The receiver pins the app from the hook URL (/hooks/<app>); only `tag`
-      # is honoured from the body. Non-2xx fails the job (--fail-with-body).
-      - name: Trigger deploy (HMAC)
-        env:
-          APP: ${{ inputs.app }}
-          DEPLOY_HOST: ${{ inputs.deploy_host }}
-          DEPLOY_TAG: ${{ inputs.deploy_tag }}
-          DEPLOY_WEBHOOK_SECRET: ${{ secrets.DEPLOY_WEBHOOK_SECRET }}
-        run: |
-          set -euo pipefail
-
-          # Tag to deploy (default "main"); sha-<short> is also pushed above and
-          # can be used later for immutable deploys by setting the deploy_tag input.
-          tag="${DEPLOY_TAG}"
-
-          # Defence in depth: the SAME whitelist the receiver + executor enforce.
-          if ! printf '%s' "$tag" | grep -Eq '^[A-Za-z0-9._-]{1,128}$'; then
-            echo "::error::computed tag '$tag' fails the whitelist regex"
-            exit 1
-          fi
-
-          # Compact JSON body. The hook id (URL) pins the app; tag is the payload.
-          # printf with no trailing newline → the bytes signed == the bytes sent.
-          body="$(printf '{"app":"%s","tag":"%s"}' "$APP" "$tag")"
-
-          # HMAC-SHA256 over the RAW body → hex digest → "sha256=<hex>" header.
-          sig="$(printf '%s' "$body" \
-            | openssl dgst -sha256 -hmac "$DEPLOY_WEBHOOK_SECRET" \
-            | awk '{print $NF}')"
-
-          url="https://deploy.${DEPLOY_HOST}/hooks/${APP}"
-          echo "POST ${url}  body=${body}  (signature redacted)"
-
-          # --fail-with-body: print the receiver's response AND fail on non-2xx.
-          # We ALSO require the receiver's success marker ("QUEUED <app> <tag>") in
-          # the body: a bad/missing HMAC returns 200 "Hook rules were not satisfied"
-          # (running NOTHING), so a status check alone would let a REJECTED deploy
-          # masquerade as success. The marker only appears when enqueue.sh actually
-          # ran (i.e. the HMAC passed), making rejection a hard CI failure.
-          http_body="$(curl --fail-with-body -sS \
-            -X POST "$url" \
-            -H 'Content-Type: application/json' \
-            -H "X-Hub-Signature-256: sha256=${sig}" \
-            -d "$body")"
-
-          echo "receiver response: ${http_body}"
-          case "$http_body" in
-            *"QUEUED ${APP}"*) echo "deploy trigger accepted for ${APP} @ ${tag}" ;;
-            *) echo "::error::deploy NOT enqueued (no success marker — HMAC rejected or receiver error)"; exit 1 ;;
-          esac
+  deploy:
+    needs: build
+    uses: ./.github/workflows/_deploy.yml
+    permissions:
+      contents: read
+      checks: read
+    with:
+      app: ${{ inputs.app }}
+      deploy_host: ${{ inputs.deploy_host }}
+      # Immutable sha tag (from the build) when deploy_sha=true, else the branch tag.
+      deploy_tag: ${{ inputs.deploy_sha && needs.build.outputs.sha_tag || inputs.deploy_tag }}
+      await_deploy: ${{ inputs.await_deploy }}
+      await_timeout_seconds: ${{ inputs.await_timeout_seconds }}
+    secrets:
+      DEPLOY_WEBHOOK_SECRET: ${{ secrets.DEPLOY_WEBHOOK_SECRET }}

@@ -1,0 +1,141 @@
+# =============================================================================
+# .github/workflows/_build.yml — TheDevs shared, reusable BUILD workflow.
+# =============================================================================
+# Builds a multi-tagged image and PUSHES it to GHCR. This is the HALF of the old
+# _ship.yml that needs to be CUSTOMISED per app (build args, cache, target,
+# secrets). It is split out from the deploy trigger ON PURPOSE:
+#   - This job holds `packages:write` + the GHCR token. It NEVER sees the deploy
+#     secret (DEPLOY_WEBHOOK_SECRET) — that lives only in _deploy.yml. A build-arg
+#     or cache bug therefore cannot reach the deploy signer.
+#   - The curated tag scheme lives here ONCE for every app (no drift across repos).
+#
+# Tags pushed to ghcr.io/<owner>/<app>:
+#   - sha-<full-git-sha>  : the IMMUTABLE tag (traceability / rollback / immutable
+#                           deploys). Full 40-char sha so `deploy_sha: true` can
+#                           deploy EXACTLY this build with no ambiguity.
+#   - <branch>            : the branch ref (e.g. "main") — deployed by default.
+#   - latest             : convenience pointer, ONLY on the default branch.
+# =============================================================================
+
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: Fully-qualified GHCR image (lowercase). Default ghcr.io/<owner>/<repo>.
+        required: false
+        type: string
+        default: ghcr.io/${{ github.repository }}
+      context:
+        description: Docker build context.
+        required: false
+        type: string
+        default: .
+      dockerfile:
+        description: Path to the Dockerfile (relative to context).
+        required: false
+        type: string
+        default: Dockerfile
+      platforms:
+        description: Target platform(s). The box is amd64-only; keep it single.
+        required: false
+        type: string
+        default: linux/amd64
+      target:
+        description: Optional multi-stage build target (empty = default/final stage).
+        required: false
+        type: string
+        default: ''
+      build_args:
+        description: >-
+          Newline-separated KEY=VALUE build args passed to `docker build`
+          (e.g. APP_VERSION=<git-sha>). NON-SECRET only — build args are baked into
+          image metadata/history and are readable by anyone who can pull the image.
+          For secrets use the BUILD_SECRETS secret (BuildKit mounts).
+        required: false
+        type: string
+        default: ''
+      cache:
+        description: >-
+          Enable GitHub Actions layer cache (type=gha), scoped PER IMAGE so apps
+          never share/poison each other's cache. Speeds rebuilds; never changes the
+          produced image.
+        required: false
+        type: boolean
+        default: true
+      provenance:
+        description: Emit SLSA provenance attestation (default true == prior behavior).
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      BUILD_SECRETS:
+        description: >-
+          Optional newline-separated id=KEY entries for BuildKit secret MOUNTS
+          (`RUN --mount=type=secret,id=KEY ...`). Mounted at build time, NOT baked
+          into layers. This is the SECRET-SAFE channel for build inputs. NEVER pass
+          the deploy webhook secret here.
+        required: false
+    outputs:
+      digest:
+        description: The pushed image digest (immutable content address).
+        value: ${{ jobs.build.outputs.digest }}
+      sha_tag:
+        description: The immutable tag this build pushed (sha-<full-git-sha>).
+        value: ${{ jobs.build.outputs.sha_tag }}
+
+jobs:
+  build:
+    name: build & push image
+    runs-on: ubuntu-latest
+    # Least privilege: read the repo, push the package. NO deploy secret here.
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.bp.outputs.digest }}
+      sha_tag: sha-${{ github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Immutable tag uses the FULL git sha (format=long) so `deploy_sha: true`
+      # deploys exactly this image with zero short-sha ambiguity.
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ inputs.image }}
+          tags: |
+            type=sha,prefix=sha-,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+
+      - name: Build and push
+        id: bp
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.context }}/${{ inputs.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          target: ${{ inputs.target }}
+          build-args: ${{ inputs.build_args }}
+          secrets: ${{ secrets.BUILD_SECRETS }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: ${{ inputs.provenance }}
+          # Per-IMAGE cache scope → no cross-app cache poisoning. Empty when cache=false.
+          cache-from: ${{ inputs.cache && format('type=gha,scope={0}', inputs.image) || '' }}
+          cache-to: ${{ inputs.cache && format('type=gha,mode=max,scope={0}', inputs.image) || '' }}
