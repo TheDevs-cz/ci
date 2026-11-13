@@ -70,6 +70,14 @@ on:
         required: false
         type: number
         default: 300
+      head_sha:
+        description: >-
+          Commit the box reports the deploy status on (and this workflow awaits it on).
+          Default '' == github.sha (prior behavior). Set by _ship.yml when it built an
+          explicit `ref`.
+        required: false
+        type: string
+        default: ''
     secrets:
       DEPLOY_WEBHOOK_SECRET:
         description: Per-app HMAC secret shared ONLY with this app's hook on the box.
@@ -98,7 +106,7 @@ jobs:
           APP: ${{ inputs.app }}
           DEPLOY_HOST: ${{ inputs.deploy_host }}
           DEPLOY_TAG: ${{ inputs.deploy_tag }}
-          HEAD_SHA: ${{ github.sha }}
+          HEAD_SHA: ${{ inputs.head_sha || github.sha }}
           DEPLOY_WEBHOOK_SECRET: ${{ secrets.DEPLOY_WEBHOOK_SECRET }}
         run: |
           set -euo pipefail
@@ -114,6 +122,9 @@ jobs:
           job_id="$(openssl rand -hex 16)"   # 32 hex
           nonce="$(openssl rand -hex 16)"     # 32 hex
           head_sha="${HEAD_SHA}"              # 40 hex (the commit the check attaches to)
+          if ! printf '%s' "$head_sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::head_sha is not a 40-hex commit sha"; exit 1
+          fi
 
           # Compact JSON body — bytes signed == bytes sent (no trailing newline).
           body="$(printf '{"app":"%s","tag":"%s","job_id":"%s","head_sha":"%s","nonce":"%s"}' \

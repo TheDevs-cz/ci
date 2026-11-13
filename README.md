@@ -207,6 +207,7 @@ already-started box deploy still finishes (the box doesn't depend on the CI conn
 | `deploy_sha`            | no       | `false`                   | deploy the immutable `sha-<git-sha>` tag just built |
 | `await_deploy`          | no       | `true`                    | wait for the real deploy result; fail the run if it failed (needs box D27 + token) |
 | `await_timeout_seconds` | no       | `300`                     | max seconds to await the result, then red (raise for slow/queued) |
+| `ref`                   | no       | `''`                      | commit (full sha) to build and deploy instead of the event's commit — see "Callers triggered by `workflow_run`" |
 | `context`               | no       | `.`                       | Docker build context |
 | `dockerfile`            | no       | `Dockerfile`              | path to the Dockerfile (relative to `context`) |
 | `platforms`             | no       | `linux/amd64`             | build platform(s); the box is amd64-only |
@@ -216,6 +217,28 @@ already-started box deploy still finishes (the box doesn't depend on the CI conn
 | `provenance`            | no       | `true`                    | SLSA provenance attestation |
 
 Secrets: **`DEPLOY_WEBHOOK_SECRET`** (required), **`BUILD_SECRETS`** (optional, BuildKit mounts).
+
+## Callers triggered by `workflow_run` (ship the tested commit)
+
+A caller that runs "after the Tests workflow succeeded" (`on: workflow_run`) has a trap: in that event
+`github.sha` is the **default branch's HEAD when the event fired**, not the commit whose run completed.
+Without `ref` the build checks out and ships that HEAD — a commit pushed while the tests of the previous
+one were running goes to production before (or without) passing its own tests.
+
+Pass the tested commit:
+
+```yaml
+    with:
+      app: my-app
+      ref: ${{ github.event.workflow_run.head_sha }}
+      build_args: APP_VERSION=${{ github.event.workflow_run.head_sha }}
+```
+
+With `ref` set the build checks out that commit, the immutable tag is `sha-<that commit>`, the image's
+`org.opencontainers.image.revision` label names it and the deploy status is reported on it. The branch
+tag (`main`) and `latest` move to it as well, so two such runs must not overlap and an older commit
+must not be built after a newer one: give the caller a `concurrency` group and refuse stale runs in a
+preflight job (wboost's `release.yml` is the worked example). Without `ref` nothing changes.
 
 ## Composing the halves directly (advanced)
 

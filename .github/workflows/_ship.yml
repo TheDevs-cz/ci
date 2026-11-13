@@ -62,6 +62,16 @@ on:
         required: false
         type: number
         default: 300
+      ref:
+        description: >-
+          Commit (full sha) to build and deploy INSTEAD of the event's commit. Default
+          '' == prior behavior. For callers triggered by `workflow_run` (github.sha is
+          then the default branch's HEAD, not the commit whose run completed): pass
+          `github.event.workflow_run.head_sha` to ship exactly the tested commit. The
+          deploy status is then reported on that commit too.
+        required: false
+        type: string
+        default: ''
       # ---- build customisation ----
       context:
         description: Docker build context.
@@ -123,6 +133,7 @@ jobs:
       build_args: ${{ inputs.build_args }}
       cache: ${{ inputs.cache }}
       provenance: ${{ inputs.provenance }}
+      ref: ${{ inputs.ref }}
     secrets:
       # GHCR token is provided automatically to _build.yml; the deploy secret is
       # deliberately NOT passed here.
@@ -140,5 +151,8 @@ jobs:
       deploy_tag: ${{ inputs.deploy_sha && needs.build.outputs.sha_tag || inputs.deploy_tag }}
       await_deploy: ${{ inputs.await_deploy }}
       await_timeout_seconds: ${{ inputs.await_timeout_seconds }}
+      # The commit the deploy status attaches to: the built one when `ref` was given,
+      # else '' (== github.sha inside _deploy.yml, as before).
+      head_sha: ${{ inputs.ref != '' && needs.build.outputs.sha || '' }}
     secrets:
       DEPLOY_WEBHOOK_SECRET: ${{ secrets.DEPLOY_WEBHOOK_SECRET }}
